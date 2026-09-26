@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+store.db
+.venv/
+venv/
+
+kb_index.npz

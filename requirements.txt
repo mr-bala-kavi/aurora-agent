@@ -1,0 +1,8 @@
+# Core (RAG)
+sentence-transformers>=3.0
+numpy>=1.24
+
+# LLM backend: none needed if you use Hermes (default).
+# Install only if you point PROVIDER at these:
+# openai>=1.40
+# anthropic>=0.40
